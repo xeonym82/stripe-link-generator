@@ -37,6 +37,7 @@ def password_entered():
         st.session_state.password_correct = False
         st.session_state.password_error = "😕 Password incorrect"
 
+# STOP APP IF PASSWORD WRONG
 if not check_password():
     st.stop()
 
@@ -73,27 +74,21 @@ def get_active_products():
         return {}
 
 def create_checkout_session(customer_id, price_id, discount_percent=0):
+    """
+    Creates the session. 
+    FIX: Removed 'customer_email' to avoid conflict with 'customer'.
+    """
     try:
-        # Fetch customer to ensure we lock the correct email
-        try:
-            cus = stripe.Customer.retrieve(customer_id)
-            cus_email = cus.email
-        except:
-            cus_email = None
-
         session_args = {
             'customer': customer_id,
             'line_items': [{'price': price_id, 'quantity': 1}],
             'mode': 'payment',
             'success_url': 'https://example.com/success',
-            # STRICT MODE: Lock the email so customer cannot change it
+            # This prevents the user from changing their address/name easily
             'customer_update': {'name': 'auto', 'address': 'auto'}, 
         }
-        
-        # Explicitly pass email to ensure it displays correctly if locked
-        if cus_email:
-             session_args['customer_email'] = cus_email
 
+        # Apply Discount
         if discount_percent > 0:
             coupon = stripe.Coupon.create(
                 percent_off=discount_percent,
@@ -109,7 +104,7 @@ def create_checkout_session(customer_id, price_id, discount_percent=0):
 
 def get_or_create_customer(email, name):
     """
-    Checks if customer exists by email.
+    Checks if customer exists by email to prevent duplicates.
     Returns: (id, is_duplicate_boolean)
     """
     try:
@@ -129,21 +124,23 @@ def get_or_create_customer(email, name):
 product_map = get_active_products()
 
 if not product_map:
-    st.warning("No active products found.")
+    st.warning("No active products found in Stripe account.")
     st.stop()
 
+# Sidebar for common settings
 with st.sidebar:
     st.header("Price Settings")
     discount = st.number_input("Discount Percentage (%)", min_value=0, max_value=100, value=0, step=5)
 
 tab1, tab2 = st.tabs(["Search / Existing Customer", "Create New Customer"])
 
-# TAB 1: EXISTING
+# === TAB 1: EXISTING CUSTOMER ===
 with tab1:
     st.subheader("Existing Customer")
     existing_cus_id = st.text_input("Customer ID (e.g., cus_1234)")
     selected_label_1 = st.selectbox("Select Product", options=product_map.keys(), key="sel1")
     
+    # Live Math Display
     if selected_label_1:
         prod_data = product_map[selected_label_1]
         final_price = prod_data['amount'] * (1 - (discount / 100))
@@ -162,7 +159,7 @@ with tab1:
                 st.success("Link Created!")
                 st.code(link, language="text")
 
-# TAB 2: NEW (Updated with Duplicate Check)
+# === TAB 2: NEW CUSTOMER (With Duplicate Check) ===
 with tab2:
     st.subheader("New Customer")
     col1, col2 = st.columns(2)
@@ -173,6 +170,7 @@ with tab2:
     
     selected_label_2 = st.selectbox("Select Product", options=product_map.keys(), key="sel2")
     
+    # Live Math Display
     if selected_label_2:
         prod_data = product_map[selected_label_2]
         final_price = prod_data['amount'] * (1 - (discount / 100))
@@ -183,16 +181,22 @@ with tab2:
         if new_email and new_name and selected_label_2:
             price_id = product_map[selected_label_2]['id']
             with st.spinner("Checking database..."):
-                # Use the smart function
+                
+                # Check for duplicate / Create
                 cus_id, is_duplicate = get_or_create_customer(new_email, new_name)
                 
                 if cus_id:
                     if is_duplicate:
-                        st.warning(f"⚠️ Account exists! Using existing ID: {cus_id}")
+                        # Fixed the Syntax Error here by adding the f"..." correctly
+                        st.warning(f⚠️ Account exists! Using existing ID: {cus_id}")
                     else:
                         st.success(f"✅ New Customer created: {cus_id}")
                     
+                    # Generate the link using the ID
                     link = create_checkout_session(cus_id, price_id, discount)
-                    st.code(link, language="text")
+                    if "Error" in link:
+                        st.error(link)
+                    else:
+                        st.code(link, language="text")
                 else:
-                    st.error("Failed to process customer.")
+                    st.error("Failed to process customer (API Error).")

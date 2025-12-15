@@ -188,7 +188,7 @@ with tab2:
                 if cus_id:
                     if is_duplicate:
                         # Fixed the Syntax Error here by adding the f"..." correctly
-                        st.warning(f⚠️ Account exists! Using existing ID: {cus_id}")
+                        st.warning(f"⚠️ Account exists! Using existing ID: {cus_id}")
                     else:
                         st.success(f"✅ New Customer created: {cus_id}")
                     

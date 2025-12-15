@@ -4,26 +4,18 @@ import stripe
 # --- 1. Password Protection ---
 def check_password():
     """Returns `True` if the user had the correct password."""
-    # This looks for APP_PASSWORD in your secrets
     try:
         actual_password = st.secrets["APP_PASSWORD"] 
-    except FileNotFoundError:
-        # Fallback if secret is missing (prevents crash, but locks app)
+    except (FileNotFoundError, KeyError):
         st.error("Secrets not found. Please add APP_PASSWORD to secrets.")
         return False
-    except KeyError:
-        st.error("APP_PASSWORD key not found in secrets.")
-        return False
 
-    # Initialize session state for password
     if "password_correct" not in st.session_state:
         st.session_state.password_correct = False
 
-    # If password is correct, return True immediately
     if st.session_state.password_correct:
         return True
 
-    # Show input box
     st.text_input(
         "Enter Team Password", 
         type="password", 
@@ -37,17 +29,14 @@ def check_password():
     return False
 
 def password_entered():
-    """Checks whether a password entered by the user is correct."""
     if st.session_state["password_input"] == st.secrets["APP_PASSWORD"]:
         st.session_state.password_correct = True
-        # delete the error message if it exists
         if "password_error" in st.session_state:
             del st.session_state.password_error
     else:
         st.session_state.password_correct = False
         st.session_state.password_error = "😕 Password incorrect"
 
-# CALL THE FUNCTION: If false, stop the app here.
 if not check_password():
     st.stop()
 
@@ -58,7 +47,7 @@ st.title("💳 Payment Link Generator")
 try:
     stripe.api_key = st.secrets["STRIPE_API_KEY"]
 except KeyError:
-    st.error("STRIPE_API_KEY not found. Check your Advanced Settings on Streamlit Cloud.")
+    st.error("STRIPE_API_KEY not found. Check your Advanced Settings.")
     st.stop()
 
 # --- 3. Helper Functions ---
@@ -85,12 +74,26 @@ def get_active_products():
 
 def create_checkout_session(customer_id, price_id, discount_percent=0):
     try:
+        # Fetch customer to ensure we lock the correct email
+        try:
+            cus = stripe.Customer.retrieve(customer_id)
+            cus_email = cus.email
+        except:
+            cus_email = None
+
         session_args = {
             'customer': customer_id,
             'line_items': [{'price': price_id, 'quantity': 1}],
             'mode': 'payment',
             'success_url': 'https://example.com/success',
+            # STRICT MODE: Lock the email so customer cannot change it
+            'customer_update': {'name': 'auto', 'address': 'auto'}, 
         }
+        
+        # Explicitly pass email to ensure it displays correctly if locked
+        if cus_email:
+             session_args['customer_email'] = cus_email
+
         if discount_percent > 0:
             coupon = stripe.Coupon.create(
                 percent_off=discount_percent,
@@ -104,11 +107,22 @@ def create_checkout_session(customer_id, price_id, discount_percent=0):
     except Exception as e:
         return f"Error: {str(e)}"
 
-def create_new_customer(email, name):
+def get_or_create_customer(email, name):
+    """
+    Checks if customer exists by email.
+    Returns: (id, is_duplicate_boolean)
+    """
     try:
-        return stripe.Customer.create(email=email, name=name).id
+        # 1. Check for duplicates
+        search = stripe.Customer.list(email=email, limit=1)
+        if search.data:
+            return search.data[0].id, True
+        
+        # 2. Create new if not found
+        new_cus = stripe.Customer.create(email=email, name=name)
+        return new_cus.id, False
     except Exception as e:
-        return None
+        return None, False
 
 # --- 4. Main Interface ---
 
@@ -148,7 +162,7 @@ with tab1:
                 st.success("Link Created!")
                 st.code(link, language="text")
 
-# TAB 2: NEW
+# TAB 2: NEW (Updated with Duplicate Check)
 with tab2:
     st.subheader("New Customer")
     col1, col2 = st.columns(2)
@@ -168,11 +182,17 @@ with tab2:
     if st.button("Create & Generate"):
         if new_email and new_name and selected_label_2:
             price_id = product_map[selected_label_2]['id']
-            with st.spinner("Processing..."):
-                new_id = create_new_customer(new_email, new_name)
-                if new_id:
-                    link = create_checkout_session(new_id, price_id, discount)
-                    st.success(f"Customer created: {new_id}")
+            with st.spinner("Checking database..."):
+                # Use the smart function
+                cus_id, is_duplicate = get_or_create_customer(new_email, new_name)
+                
+                if cus_id:
+                    if is_duplicate:
+                        st.warning(f⚠️ Account exists! Using existing ID: {cus_id}")
+                    else:
+                        st.success(f"✅ New Customer created: {cus_id}")
+                    
+                    link = create_checkout_session(cus_id, price_id, discount)
                     st.code(link, language="text")
                 else:
-                    st.error("Failed to create customer.")
+                    st.error("Failed to process customer.")

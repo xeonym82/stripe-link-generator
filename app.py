@@ -37,6 +37,7 @@ def password_entered():
         st.session_state.password_correct = False
         st.session_state.password_error = "😕 Password incorrect"
 
+# STOP APP IF PASSWORD WRONG
 if not check_password():
     st.stop()
 
@@ -53,7 +54,7 @@ except KeyError:
 # --- 3. Helper Functions ---
 @st.cache_data(ttl=300)
 def get_active_products():
-    """Fetch active prices and DETECT if they are recurring or one-time."""
+    """Fetch active prices, detect mode, and detect frequency (month/year)."""
     try:
         prices = stripe.Price.list(active=True, limit=50, expand=['data.product'])
         product_options = {}
@@ -62,41 +63,60 @@ def get_active_products():
             currency = p.currency.upper()
             product_name = p.product.name if hasattr(p.product, 'name') else "Unknown Product"
             
-            # DETECT TYPE: 'recurring' or 'one_time'
-            price_type = p.type # This comes directly from Stripe
+            # DETECT TYPE & FREQUENCY
+            price_type = p.type # 'recurring' or 'one_time'
             
-            # Determine the correct API mode
-            api_mode = 'subscription' if price_type == 'recurring' else 'payment'
-            
-            # Label adds (Sub) or (One-time) for clarity
-            type_label = "/mo" if price_type == 'recurring' else ""
-            label = f"{product_name} ({amount} {currency}{type_label})"
+            if price_type == 'recurring' and p.recurring:
+                interval = p.recurring.interval # e.g., 'month', 'year'
+                api_mode = 'subscription'
+                label_suffix = f"/{interval}"
+            else:
+                interval = "one-time"
+                api_mode = 'payment'
+                label_suffix = ""
+
+            label = f"{product_name} ({amount} {currency}{label_suffix})"
             
             product_options[label] = {
                 "id": p.id,
                 "amount": amount,
                 "currency": currency,
-                "mode": api_mode # Store the correct mode here!
+                "mode": api_mode,
+                "interval": interval # Store this to use in metadata later
             }
         return product_options
     except Exception as e:
         st.error(f"Error connecting to Stripe: {e}")
         return {}
 
-def create_checkout_session(customer_id, price_id, mode, discount_percent=0):
+def create_checkout_session(customer_id, price_id, mode, discount_percent=0, metadata=None):
     """
-    Creates the session. 
-    Accepts 'mode' (payment or subscription) dynamically.
+    Creates the session with Metadata injected.
     """
     try:
+        # 1. Prepare Base Metadata
+        if metadata is None:
+            metadata = {}
+        
+        # Add a system tag
+        metadata['generated_by'] = "CSM App"
+
         session_args = {
             'customer': customer_id,
             'line_items': [{'price': price_id, 'quantity': 1}],
-            'mode': mode, # <--- DYNAMIC MODE HERE
+            'mode': mode,
             'success_url': 'https://example.com/success',
-            'customer_update': {'name': 'auto', 'address': 'auto'}, 
+            'customer_update': {'name': 'auto', 'address': 'auto'},
+            'metadata': metadata # Attach to the Session
         }
 
+        # 2. If Subscription, attach metadata to the Subscription object too
+        if mode == 'subscription':
+            session_args['subscription_data'] = {
+                'metadata': metadata 
+            }
+
+        # 3. Apply Discounts
         if discount_percent > 0:
             coupon = stripe.Coupon.create(
                 percent_off=discount_percent,
@@ -126,40 +146,56 @@ def get_or_create_customer(email, name):
 product_map = get_active_products()
 
 if not product_map:
-    st.warning("No active products found.")
+    st.warning("No active products found in Stripe account.")
     st.stop()
 
+# Sidebar
 with st.sidebar:
     st.header("Price Settings")
-    discount = st.number_input("Discount (%)", min_value=0, max_value=100, value=0, step=5)
+    discount = st.number_input("Discount Percentage (%)", min_value=0, max_value=100, value=0, step=5)
 
 tab1, tab2 = st.tabs(["Search / Existing Customer", "Create New Customer"])
 
-# === TAB 1: EXISTING ===
+# === TAB 1: EXISTING CUSTOMER ===
 with tab1:
     st.subheader("Existing Customer")
     existing_cus_id = st.text_input("Customer ID (e.g., cus_1234)")
     selected_label_1 = st.selectbox("Select Product", options=product_map.keys(), key="sel1")
     
+    # Calculate Data for Metadata
+    final_price_1 = 0
+    frequency_1 = "unknown"
+    
     if selected_label_1:
         prod_data = product_map[selected_label_1]
-        final_price = prod_data['amount'] * (1 - (discount / 100))
-        st.metric("Price", f"{final_price:.2f} {prod_data['currency']}", f"-{discount}%" if discount else None)
+        final_price_1 = prod_data['amount'] * (1 - (discount / 100))
+        frequency_1 = prod_data['interval']
+        
+        if discount > 0:
+            st.metric("Final Price", f"{final_price_1:.2f} {prod_data['currency']}", f"-{discount}%")
+        else:
+            st.metric("Price", f"{prod_data['amount']} {prod_data['currency']}")
 
     if st.button("Generate Link (Existing)"):
         if existing_cus_id and selected_label_1:
             price_id = product_map[selected_label_1]['id']
-            # Fetch the correct mode from our map
             mode = product_map[selected_label_1]['mode']
             
-            link = create_checkout_session(existing_cus_id, price_id, mode, discount)
+            # Prepare Metadata
+            my_metadata = {
+                "amount_paid": f"{final_price_1:.2f}",
+                "payment_frequency": frequency_1
+            }
+
+            link = create_checkout_session(existing_cus_id, price_id, mode, discount, metadata=my_metadata)
+            
             if "Error" in link:
                 st.error(link)
             else:
-                st.success(f"Link Created! (Mode: {mode})")
+                st.success(f"Link Created! (Metadata: {frequency_1}, {final_price_1:.2f})")
                 st.code(link, language="text")
 
-# === TAB 2: NEW ===
+# === TAB 2: NEW CUSTOMER ===
 with tab2:
     st.subheader("New Customer")
     col1, col2 = st.columns(2)
@@ -170,10 +206,17 @@ with tab2:
     
     selected_label_2 = st.selectbox("Select Product", options=product_map.keys(), key="sel2")
     
+    # Calculate Data for Metadata
+    final_price_2 = 0
+    frequency_2 = "unknown"
+
     if selected_label_2:
         prod_data = product_map[selected_label_2]
-        final_price = prod_data['amount'] * (1 - (discount / 100))
-        st.metric("Price", f"{final_price:.2f} {prod_data['currency']}", f"-{discount}%" if discount else None)
+        final_price_2 = prod_data['amount'] * (1 - (discount / 100))
+        frequency_2 = prod_data['interval']
+        
+        if discount > 0:
+            st.metric("Final Price", f"{final_price_2:.2f} {prod_data['currency']}", f"-{discount}%")
 
     if st.button("Create & Generate"):
         if new_email and new_name and selected_label_2:
@@ -185,14 +228,21 @@ with tab2:
                 
                 if cus_id:
                     if is_duplicate:
-                        st.warning(f"⚠️ Account exists! Using ID: {cus_id}")
+                        st.warning(f⚠️ Account exists! Using existing ID: {cus_id}")
                     else:
                         st.success(f"✅ New Customer created: {cus_id}")
                     
-                    link = create_checkout_session(cus_id, price_id, mode, discount)
+                    # Prepare Metadata
+                    my_metadata = {
+                        "amount_paid": f"{final_price_2:.2f}",
+                        "payment_frequency": frequency_2
+                    }
+                    
+                    link = create_checkout_session(cus_id, price_id, mode, discount, metadata=my_metadata)
+                    
                     if "Error" in link:
                         st.error(link)
                     else:
                         st.code(link, language="text")
                 else:
-                    st.error("Failed to process customer.")
+                    st.error("Failed to process customer (API Error).")
